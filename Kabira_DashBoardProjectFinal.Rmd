@@ -1,0 +1,1985 @@
+---
+title: "Kabira Project"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: scroll
+    source_code: embed
+    theme: yeti
+---
+
+```{r setup, include=FALSE,warning=FALSE}
+#include=FALSE will not include r code in output
+#warning=FALSE will remove any warnings from output
+
+library(GGally) #v2.1.2
+library(ggcorrplot) #v0.1.3
+library(MASS) #v7.3-54 for Boston data
+library(flexdashboard) #v0.5.2
+library(plotly) #v4.10.1
+library(crosstalk) #v1.2.0
+library(tidymodels) 
+  #library(dplyr) #v1.0.7 %>%, select(), select_if(), filter(), mutate(), group_by(), 
+    #summarize(), tibble()
+  #library(ggplot2) #v3.3.5 ggplot()
+library(ISLR) #v1.4 Default, Auto dataset
+library(themis) #v1.0.0 step_smote
+library(tidymodels) 
+library(parsnip) #v1.0.3 linear_reg(), discrim_regularized(), set_engine(), set_mode(), fit(), predict()
+library(yardstick) #v1.1.0 metrics(), roc_auc(), roc_curve(), metric_set(), conf_matrix()
+library(dplyr) #v1.0.10 %>%, select(), select_if(), filter(), mutate(), group_by(), 
+    #summarize(), tibble()
+  #library(ggplot2) #v3.4.0 ggplot()
+  #library(broom) #v1.0.2 for tidy(), augment(), glance()
+  #library(rsample) #v1.1.1 initial_split(), training(), testing()
+library(readr) #v2.1.3 read_csv()
+library(knitr) #v1.41 kable()
+library(stringr)
+theme_set(theme_bw()) #sets default ggplot output style
+
+library(boot) #1.3-28.1 boot()
+library(discrim) #v1.0.0 discriminant analysis wrapper
+library(janitor) #v2.1.0 clean_names()
+library(vip) #0.3.2 vip() (variable importance)
+library(glmnet) #v4.1-6 for ridge/lasso regression
+library(skimr) #v2.1.5
+
+```
+
+```{r load_data}
+# read in compressed file
+abb1 <- read_csv("listings.csv.gz")
+
+# for this analysis, I did a lot of recoding of the raw file downloaded from the website
+
+
+# 1. I eliminated the variables that described the property, as well as the property's id and the host's id
+# 2. I recoded TRUE/FALSE (lgl type) variables into factor variables (fctr type)
+# 3. I recoded variables that had % or $ signs into numeric values (dbl type)
+# 4. I recoded variables that had a limited number of choices (for instance the neighborhood's name) into factor variables
+# 5. I eliminated date variables (date type) and made new numeric variables that list the number of elapsed months from the date until 2022.12.31 (the date that the data was scraped from the website)
+# 6. I eliminated a variable that included both the number and type of baths and put the number of baths into one new numeric variable and the type of baths into a factor variable
+# 7. I created a new (factor type) categorical variable for the purposes of doing a model to predict a categorical variable: if the review_scores_value was 5.0 (the highest possible rating), I coded it as 'excellent'; all other values were coded as 'other'. 
+# 8. I deleted all records that had null values. This reduced the number of records from 5250 to 3050.
+
+abb1 <- abb1 %>%
+  mutate(host_is_superhost = ifelse(host_is_superhost == TRUE, "yes", "no"),
+         host_in_denver = ifelse(host_location == "Denver, CO", "yes", "no"),
+         neighborhood = neighbourhood_cleansed, max_guests = accommodates, 
+         min_nights = minimum_nights_avg_ntm, max_nights = maximum_nights_avg_ntm) 
+
+
+
+abb1 <- abb1 %>%
+  select(id, name, host_id, host_name, host_since, host_in_denver, host_response_time, host_response_rate, host_acceptance_rate, host_is_superhost, neighborhood, latitude, longitude, room_type, max_guests, bathrooms_text, bedrooms, beds, price, min_nights, max_nights, number_of_reviews, number_of_reviews_ltm, first_review, last_review, review_scores_rating, review_scores_accuracy, review_scores_cleanliness, review_scores_checkin, review_scores_communication, review_scores_location, review_scores_value, calculated_host_listings_count, reviews_per_month)
+
+abb1 <- abb1 %>%
+  mutate(price = ifelse(price == 'N/A' | price== '$0.00', 0, price)) %>%
+  mutate(host_response_rate = ifelse(host_response_rate== 'N/A','0%',host_response_rate)) %>%
+  mutate(host_acceptance_rate = ifelse(host_acceptance_rate== 'N/A', '0%', host_acceptance_rate)) %>%
+  mutate(id = as.character(id), host_id = as.character(host_id)) %>%
+  mutate(host_response_time = ifelse(host_response_time== 'N/A', NA, host_response_time)) %>%
+  mutate(neighborhood = ifelse(neighborhood == 'Kennedy' | neighborhood == 'Southmoor Park', NA, neighborhood))
+
+abb1 <- abb1 %>%
+  mutate(price = as.numeric(gsub("[\\$,]", "", price)))%>%
+  mutate(host_response_rate = as.numeric(gsub("%$", "", host_response_rate)))%>%
+  mutate(host_acceptance_rate = as.numeric(gsub("%$", "", host_acceptance_rate))) %>%
+  mutate(host_response_time = as.factor(host_response_time)) %>%
+  mutate(room_type = as.factor(room_type)) %>%
+  mutate(neighborhood = as.factor(neighborhood)) %>%
+  mutate(host_in_denver = as.factor(host_in_denver)) %>%
+  mutate(host_is_superhost = as.factor(host_is_superhost)) %>%
+  mutate(price = ifelse(price > 0 & price < 3000, price, NA)) %>%
+
+  mutate(host_response_rate = ifelse(host_response_rate > 0, host_response_rate, NA)) %>%
+  mutate(host_acceptance_rate = ifelse(host_acceptance_rate >0, host_acceptance_rate, NA)) %>%
+  mutate(host_tenure = as.numeric(difftime("2022-12-31", abb1$host_since, units = "days"))/(365.25/12),
+         since_first_review = as.numeric(difftime("2022-12-31", abb1$first_review, units = "days"))/(365.25/12),
+          since_last_review = as.numeric(difftime("2022-12-31", abb1$last_review, units = "days"))/(365.25/12)) %>%
+  na.omit()
+
+abb1 <- abb1 %>%
+  mutate(num_bath = case_when(bathrooms_text == 'Shared half-bath' ~ .5,
+                              bathrooms_text == '1 bath' ~ 1,
+                              bathrooms_text == '1 shared bath' ~ 1,
+                              bathrooms_text == '1 private bath' ~ 1,
+                              bathrooms_text == '1.5 baths' ~ 1.5,
+                              bathrooms_text == '1.5 shared baths' ~ 1.5,
+                              bathrooms_text == '2 baths' ~ 2,
+                              bathrooms_text == '2 shared baths' ~ 2,
+                              bathrooms_text == '2.5 baths' ~ 2.5,
+                              bathrooms_text == '2.5 shared baths' ~ 2.5,
+                              bathrooms_text == '3 baths' ~ 3,
+                              bathrooms_text == '3 shared baths' ~ 3,
+                              bathrooms_text == '3.5 baths' ~ 3.5,
+                              bathrooms_text == '3.5 shared baths' ~ 3.5,
+                              bathrooms_text == '4 baths' ~ 4,
+                              bathrooms_text == '4 shared baths' ~ 4,
+                              bathrooms_text == '4.5 baths' ~ 4.5,
+                              bathrooms_text == '4.5 shared baths' ~ 4.5,
+                              bathrooms_text == '5 baths' ~ 5,
+                              bathrooms_text == '5 shared baths' ~ 5,
+                              bathrooms_text == '5.5 baths' ~ 5.5,
+                              bathrooms_text == '5.5 shared baths' ~ 5.5,
+                              bathrooms_text == '6 baths' ~ 6,
+                              bathrooms_text == '6 shared baths' ~ 6,
+                              bathrooms_text == '6.5 baths' ~ 6.5,
+                              bathrooms_text == '6.5 shared baths' ~ 6.5,
+                              bathrooms_text == '7 baths' ~ 7,
+                              bathrooms_text == '7 shared baths' ~ 7,
+                              bathrooms_text == '7.5 baths' ~ 7.5,
+                              bathrooms_text == '7.5 shared baths' ~ 7.5,
+                              bathrooms_text == '8 baths' ~ 8,
+                              bathrooms_text == '8 shared baths' ~ 8,
+                              bathrooms_text == '8.5 baths' ~ 8.5,
+                              bathrooms_text == '8.5 shared baths' ~ 8.5,
+                              bathrooms_text == '9 baths' ~ 9,
+                              bathrooms_text == '9 shared baths' ~ 9,
+                              bathrooms_text == '9.5 baths' ~ 9.5,
+                              bathrooms_text == '9.5 shared baths' ~ 9.5)) %>%
+  mutate(bath_type = 
+           as.factor(case_when(bathrooms_text == 'Shared half-bath' ~ 'shared',
+                              bathrooms_text == '1 bath' ~ 'private',
+                              bathrooms_text == '1 shared bath' ~ 'shared',
+                              bathrooms_text == '1 private bath' ~ 'private',
+                              bathrooms_text == '1.5 baths' ~ 'private',
+                              bathrooms_text == '1.5 shared baths' ~ 'shared',
+                              bathrooms_text == '2 baths' ~ 'private',
+                              bathrooms_text == '2 shared baths' ~ 'shared',
+                              bathrooms_text == '2.5 baths' ~ 'private',
+                              bathrooms_text == '2.5 shared baths' ~ 'shared',
+                              bathrooms_text == '3 baths' ~ 'private',
+                              bathrooms_text == '3 shared baths' ~ 'shared',
+                              bathrooms_text == '3.5 baths' ~ 'private',
+                              bathrooms_text == '3.5 shared baths' ~ 'shared',
+                              bathrooms_text == '4 baths' ~ 'private',
+                              bathrooms_text == '4 shared baths' ~ 'shared',
+                              bathrooms_text == '4.5 baths' ~ 'private',
+                              bathrooms_text == '4.5 shared baths' ~ 'shared',
+                              bathrooms_text == '5 baths' ~ 'private',
+                              bathrooms_text == '5 shared baths' ~ 'shared',
+                              bathrooms_text == '5.5 baths' ~ 'private',
+                              bathrooms_text == '5.5 shared baths' ~ 'shared',
+                              bathrooms_text == '6 baths' ~ 'private',
+                              bathrooms_text == '6 shared baths' ~ 'shared',
+                              bathrooms_text == '6.5 baths' ~ 'private',
+                              bathrooms_text == '6.5 shared baths' ~ 'shared',
+                              bathrooms_text == '7 baths' ~ 'private',
+                              bathrooms_text == '7 shared baths' ~ 'shared',
+                              bathrooms_text == '7.5 baths' ~ 'private',
+                              bathrooms_text == '7.5 shared baths' ~ 'shared',
+                              bathrooms_text == '8 baths' ~ 'private',
+                              bathrooms_text == '8 shared baths' ~ 'shared',
+                              bathrooms_text == '8.5 baths' ~ 'private',
+                              bathrooms_text == '8.5 shared baths' ~ 'shared',
+                              bathrooms_text == '9 baths' ~ 'private',
+                              bathrooms_text == '9 shared baths' ~ 'shared',
+                              bathrooms_text == '9.5 baths' ~ 'private',
+                              bathrooms_text == '9.5 shared baths' ~ 'shared')))
+
+
+abb1 <- abb1 %>%
+  mutate(value_score_cat = as.factor(if_else(abb1$review_scores_value == 5.00, "excellent", "other")))
+
+abb1 <- abb1 %>%
+  select(., - bathrooms_text, -id, -name, -host_id, -host_name, -host_since, -first_review, -last_review)
+
+
+# creating two new datasets, one for continuous predictor and one for categorical predictor
+
+abb_reg <- abb1 %>%
+  select(., -value_score_cat)
+
+abb_cat <- abb1 %>%
+  select(., -review_scores_value)
+
+```
+
+Exec. Summary {data-orientation=rows}
+=======================================================================
+
+Row {data-height=400}
+-----------------------------------------------------------------------
+### Executive Summary
+
+#### **This project examined two questions:**
+
+1.	What factors influence the price per night of an airbnb property in Denver, Colorado?
+2.	What factors influence a property receiving a perfect score for value?
+
+#### **Data**
+This is a dataset from a website called InsideAirbnb.com.  It is a dataset that was scraped on December 30 and 31, 2022 from Airbnb for the previous 12 months’ listings for Denver, CO.
+
+The original dataset has 3050 rows and 32 variables. The variables were all normalized because of their vast differences in scale (some variables had values in the thousands; others had a maximum value of 5).  The number of normalized variables was 105.
+
+#### **Methodology**
+Analyses were done to predict two variables. Price was the continuous variable, and value_score_cat was the categorical variable. There were two values for value_score_cat. A perfect score of 5.0 was coded as "excellent”, and anything else was coded as “other”.
+
+The following methodology was undertaken for each of the variables:
+•	Examine the distribution of the variables to look for relationships
+•	Conduct simple regression analyses for baselines
+•	Normalize all variables
+•	Employ lasso regression to narrow down the number of variables
+•	Build one random forest model with all predictors and a second one with only the lasso predictors
+
+
+Column {data-width=400, data-height=400}
+-----------------------------------------------------------------------
+#### **Conclusions**
+
+### *Price*
+
+Number of baths ended up being the most important predictor of price, by a huge margin. Number of baths is a good proxy for property size: more baths suggests larger property. Price being higher for a larger property makes sense. 
+
+Looking at the analyses as a whole, the three most important factors that a host could change are minimum nights, review scores rating, and maximum nights. We see from the regression coefficients that having a lower number of minimum nights, a higher number of maximum nights, and a higher review scores rating all increase price. The recommendations for a host would be to be flexible (allow for both shorter and longer stays) and to work hard to please the customers. 
+
+### *Value Score*
+
+Review scores rating is the most important predictor of value score. 
+
+Interestingly, review scores rating is **negatively** correlated with value score. This would mean that higher-rated properties overall are rated as having lower value for the price. The other two significant predictors from the lasso regression are the number of reviews in the last 12 months and the number of months since the first review of the property.  These are both positively correlated to value score, which means that properties that have been airbnbs longer and which have had more customers recently receive better ratings for value.
+
+The takeaway from the negative correlation between review scores rating and value score may be that, even though customers have a great overall experience at an airbnb, they may believe that it was overpriced. 
+
+More research should be done before offering airbnb hosts advice on this matter, however.
+
+
+
+
+
+
+Introduction {data-orientation=rows}
+=======================================================================
+
+Row {data-height=1250}
+-----------------------------------------------------------------------
+### The Project
+
+#### The Problem Description
+
+This is a dataset from a website called InsideAirbnb.com.  It is a dataset that was scraped on December 30 and 31, 2022 from Airbnb for the previous 12 months’ listings for Denver, CO.  The website is http://insideairbnb.com/get-the-data.  Variables from the downloaded detailed dataset have been transformed in R in order to conduct the analyses. The distribution of variables will be examined first in order to look for relationships. Regression analysis will be performed in order to predict a property's per-night price. Following normalization of the variables, lasso regression will be employed to narrow down the number of variables, as well. One random forest model will be run with all predictors and a second one with the lasso predictors.  A classification analysis will be used to predict a customer's rating of the value of the property (whether the property is a good value for the price paid). Because the ratings skew high, there were two ratings assigned: 'excellent' for a perfect rating and 'other' for anything less. Lasso regression will again be used in order to narrow down the number of predictors, followed by logistic regression. One random forest model will be run with all predictors and a second one with the lasso predictors. Finally, a summary of conclusions will be presented.  
+
+#### The Data
+This dataset has 3050 rows and 32 variables. 
+
+#### Data Sources
+This is a dataset from a website called InsideAirbnb.com.  It is a dataset that was scraped on December 30 and 31, 2022 from Airbnb for the previous 12 months’ listings for Denver, CO.  The website is http://insideairbnb.com/get-the-data.  
+
+### The Data
+VARIABLES TO PREDICT WITH
+
+* **host_in_denver**: whether or not the host lives in Denver
+* **host_response_time**: how quickly a host responds to messages
+* **host_response_rate**: the percentage of requests to which a host has responded
+* **host_acceptance_rate**: the percentage of booking requests that a host accepts
+* **host_is_superhost**: whether a host has earned the Airbnb distinction “Superhost”
+* **neighborhood**: neighborhood name of the property’s location 
+* **latitude**: latitude of property listing
+* **longitude**: longitude of property listing
+* **room_type**: whether the entire home/apartment is being rented or if it is a private room
+* **max_guests**: maximum number of guests
+* **bedrooms**: number of bedrooms
+* **beds**: total number of beds
+* **price**: per/night price (in US$) - this is a predictor for the classification analysis
+* **min_nights**: minimum number of consecutive nights that the property may be rented
+* **max_nights**: maximum number of consecutive nights that the property may be rented
+* **number_of_reviews**: total number of reviews that a listing has
+* **number_of_reviews_ltm**: number of reviews that a listing has had in the last twelve months
+* **review_scores_rating**: overall average rating for the property
+* **review_scores_accuracy**: average rating for the accuracy of the property’s description
+* **review_scores_cleanliness**: average rating for the cleanliness of the property
+* **review_scores_checkin**: average rating for the ease of check-in
+* **review_scores_communication**: average rating for the host’s communication
+* **review_scores_location**: average rating for the property’s location
+* **review_scores_value**: average rating for the renters’ assessments of value of the rental experience for the price
+* **calculated_host_listings_count**: number of listings that a host has
+* **reviews_per_month**: number of total reviews / the number of months that the property has been listed
+* **host_tenure**: number of months that the host has been an Airbnb member
+* **since_first_review**: number of months since the first review
+* **since_last_review**: number of months since the most recent review
+* **num_bath**: number of bathrooms available to guests
+* **bath_type**: whether the bathroom(s) are shared or private
+
+VARIABLES WE WANT TO PREDICT
+
+* **price**: per/night price (in US$)
+* **value_score_cat**: value calculated from the review_scores_value – if the review_scores_value is 5.0, the property is rated as ‘excellent’, if not, it is rated ‘other’
+
+Explorations {data-orientation=rows}
+=======================================================================
+Column {.sidebar data-width=350}
+-------------------------------------
+
+### Data Overview 
+From this data we can see that some of the variables have very wide ranges (since_first_review, for instance) and others very narrow ones with some extreme values (min_nights and beds, for instance). Review scores for each category (except for review_scores_value) all have median values of at least 4.9, but the mean value for every one of the review scores is lower than the median value. 
+
+Looking at the average price by max_guests table, we see that - as expected - the mean price tends to increase with the maximum number of guests.  There is one surprise: the max_guests of 15 has a mean price far below the values for 14 and 16 guests. However, the n for 15 max_guests is low so a single low value could skew the mean dramatically.
+
+Column {data-width=450, data-height=1700}
+-----------------------------------------------------------------------
+### View the Data Summaries
+Here are the ranges of values for each variable.
+```{r, cache=TRUE}
+#View data
+summary(abb1)
+```
+
+Column {data-width=150, data-height=600}
+-----------------------------------------------------------------------
+### Average Price by `max_guests` (Maximum number of guests at one time)
+```{r, cache=TRUE}
+
+knitr::kable(abb1 %>%
+  group_by(max_guests) %>%
+  summarize(n=n(), mean(price)),digits=2)
+```
+
+Visualizations {data-orientation=rows}
+=======================================================================
+### Response Variables relationships with predictors
+
+* Unsurprisingly, we see that the price values are very right-skewed. Although the median price is $125, the maximum price is $2614.  Of the continuous predictors, max_guests, beds, bedrooms, and num_bath have the highest correlations with price. That would be logical, since a property that can accommodate more guests would likely command a higher price. 
+
+* We see that the 'excellent' value score category makes up approximately 20% of the total. One interesting finding is that non-superhosts outnumber superhosts in the 'excellent' value score category, even though the percentage of superhosts is much higher than the percentage of hosts who are not superhosts.
+
+* After finding collinearity between beds, bedrooms, num_baths, and max_guests, individual regressions were run between price and the four collinear variables in order to select the one with the largest coefficient. Num_bath, having the highest coefficient of 127.8, was retained in the dataset. The other three variables were eliminated.
+
+
+
+row {data-height=550}
+-----------------------------------------------------------------------
+#### Value Score
+
+```{r, cache=TRUE}
+ggplot(abb1,aes(x=value_score_cat)) + geom_bar()
+```
+
+#### Price
+```{r, cache=TRUE}
+ggplot(abb1, aes(price)) + geom_histogram(bins=15)
+```
+
+
+Row {.tabset data-height=480}
+-----------------------------------------------------------------------
+
+###  Price vs Continuous Variables #1
+```{r, cache=TRUE}
+ggcorrplot(cor(dplyr::select(abb1,price,host_response_rate, host_acceptance_rate, latitude, longitude, max_guests)))
+```
+
+###  Price vs Continuous Variables #2
+```{r, cache=TRUE}
+ggcorrplot(cor(dplyr::select(abb1,price,bedrooms, beds, price, min_nights, max_nights)))
+```
+
+###  Price vs Continuous Variables #3
+```{r, cache=TRUE}
+ggcorrplot(cor(dplyr::select(abb1,price,number_of_reviews, number_of_reviews_ltm, review_scores_rating, review_scores_accuracy, review_scores_cleanliness)))
+```
+
+###  Price vs Continuous Variables #4
+```{r, cache=TRUE}
+ggcorrplot(cor(dplyr::select(abb1,price,review_scores_checkin, review_scores_communication, review_scores_location, review_scores_value, calculated_host_listings_count)))
+```
+
+###  Price vs Continuous Variables #5
+```{r, cache=TRUE}
+ggcorrplot(cor(dplyr::select(abb1,price,reviews_per_month, host_tenure, since_first_review, since_last_review, num_bath)))
+```
+
+###  Checking Correlations Between Property Size Proxy Variables
+```{r, cache=TRUE}
+ggpairs(dplyr::select(abb1, max_guests, num_bath, bedrooms, beds), progress=FALSE)
+```
+
+###  Checking Regressions Individually Between Price and Property Size Proxy Variables
+```{r}
+reg_spec <- linear_reg() %>%
+             set_engine('lm') %>%
+             set_mode('regression') 
+reg_max_guests_fit <- reg_spec %>%
+                    fit(price ~ max_guests, data = abb_reg)
+
+tidy(reg_max_guests_fit$fit) %>%
+  kable(digits=3)
+```
+```{r}
+reg_num_bath_fit <- reg_spec %>%
+                    fit(price ~ num_bath, data = abb_reg)
+
+tidy(reg_num_bath_fit$fit) %>%
+  kable(digits=3)
+```
+```{r}
+reg_bedrooms_fit <- reg_spec %>%
+                    fit(price ~ bedrooms, data = abb_reg)
+
+tidy(reg_bedrooms_fit$fit) %>%
+  kable(digits=3)
+```
+```{r}
+reg_beds_fit <- reg_spec %>%
+                    fit(price ~ beds, data = abb_reg)
+
+tidy(reg_beds_fit$fit) %>%
+  kable(digits=3)
+
+```
+
+
+### Value Score vs Host Is Superhost
+```{r, cache=TRUE}
+abb1 %>% group_by(host_is_superhost, value_score_cat) %>%
+  summarize(n=n()) %>%
+  ggplot(aes(y=n, x=value_score_cat,fill=host_is_superhost)) +
+      geom_bar(position="dodge", stat="identity") +
+      geom_text(aes(label=n), position=position_dodge(width=0.9), vjust=-0.25) +
+      ggtitle("Value Score vs Host Is Superhost") +
+      coord_flip() #makes horizontal
+```
+```{r}
+# eliminate collinear variables (beds, bedrooms, max_guests)
+abb_reg <- abb_reg %>%
+  dplyr::select(., -beds, -bedrooms, -max_guests)
+
+abb_cat <- abb_cat %>%
+  dplyr::select(., -beds, -bedrooms, -max_guests)
+
+
+```
+
+Initial Models {data-orientation=rows}
+=======================================================================
+Row
+-----------------------------------------------------------------------
+### Baseline Models
+
+Linear and logistic regression models were run as baseline models.  All predictors were used with these initial models.
+
+We can see from the actual-predicted plot for the linear regression that there are a number of price outliers that are likely causing problems with predictions. Given the large number of outliers, the R-square value of .448 is not surprising.
+
+In contrast, the logistic regression seems to be fairly accurate overall, with accuracy of .912 and an AUC of .96. It is achieving this accuracy with a high specificity of .946 and a rather lower sensitivity of .776.
+
+-----------------------------------------------------------------------
+
+
+Row{data-height=2000, column-width = 700, .tabset .tabset-fade} 
+-----------------------------------------------------------------------
+
+### Predicting Price
+
+Here is the initial regression model predicting price using all predictors.
+
+```{r}
+
+reg_all_pred_fit <- reg_spec %>%
+                    fit(price ~ ., data = abb_reg)
+
+tidy(reg_all_pred_fit$fit) %>%
+  kable(digits=3)
+
+my_reg_metrics = metric_set(yardstick::rmse, 
+                            yardstick::mae, 
+                            yardstick::rsq)
+
+pred_reg_all_pred_fit <-reg_all_pred_fit %>%
+  augment(abb_reg)
+
+curr_reg_metrics <- pred_reg_all_pred_fit %>%
+  my_reg_metrics(truth=price, estimate = .pred)
+
+results_abb_reg <-tibble(model = 'reg_all_pred',
+                         rmse = curr_reg_metrics[[1,3]],
+                         mae = curr_reg_metrics[[2,3]],
+                         rsq = curr_reg_metrics[[3,3]])
+```
+
+#### The Full Regression Model Metrics
+```{r}
+results_abb_reg %>%
+  kable(digits=3)
+```
+
+#### Actual vs Predicted Graph
+
+```{r, cache=TRUE}
+pred_reg_all_pred_fit %>%
+  ggplot(aes(x=price, y=.pred)) +
+  geom_point(col = "#6e0000") +
+      geom_abline(col="gold") + 
+      ggtitle("Predicted Price vs Actual Price")
+```
+
+### Predicting Value Score Category
+
+Here is the initial logistic regression model predicting value score category using all predictors.
+
+```{r}
+log_spec <- logistic_reg() %>%
+             set_engine('glm') %>%
+             set_mode('classification') 
+log_all_pred_fit <- log_spec %>%
+                    fit(value_score_cat ~ ., data = abb_cat)
+
+tidy(log_all_pred_fit$fit) %>%
+  kable(digits=3)
+
+
+pred_log_all_pred <- log_all_pred_fit %>%
+                    augment(abb_cat)
+
+my_abb_cat_metrics <- metric_set(yardstick::accuracy,yardstick::sensitivity,
+                               yardstick::specificity)
+abb_cat_curr_metrics <- pred_log_all_pred %>% 
+                    my_abb_cat_metrics(truth = value_score_cat, estimate = .pred_class)
+curr_auc <- pred_log_all_pred %>%
+                  roc_auc(truth = value_score_cat, estimate = .pred_excellent) %>%
+                  pull(.estimate)
+
+results_abb_cat <- tibble(model = 'log_all_pred',
+                  accuracy = abb_cat_curr_metrics[[1,3]], 
+                  sensitivity = abb_cat_curr_metrics[[2,3]],
+                  specificity = abb_cat_curr_metrics[[3,3]],
+                  auc = round(curr_auc,2))
+```
+
+#### The Full Classification Model Metrics
+
+```{r}
+results_abb_cat %>%
+  kable(digits = 3)
+```
+
+```{r}
+# ROC
+
+#Capture the thresholds and sens/spec
+abb_cat_roc <- pred_log_all_pred %>% 
+  roc_curve(truth = value_score_cat, estimate=.pred_excellent) %>% 
+                mutate(model = paste('log_all_pred',round(curr_auc,2)))
+```
+
+#### ROC Curve
+
+```{r, cache=TRUE}
+
+#Plot the ROC Curve(s) 
+ggplot(abb_cat_roc, 
+        aes(x = 1 - specificity, y = sensitivity, 
+            group = model, col = model)) +
+        geom_path() +
+        geom_abline(lty = 3)  +
+        scale_color_brewer(palette = "Dark2") +
+        theme(legend.position = "top") 
+
+```
+
+
+Lasso-P {data-orientation=rows}
+=======================================================================
+Column {.sidebar data-width=520}
+----------------------------------------------------------------------
+
+### Lasso Model for Continuous Price Variable
+
+Because of the large number of predictors in the dataset, lasso regression was used for narrowing down the number of predictors for the continuous variable (price). and the categorical variable (value_score_cat).
+
+-----------------------------------------------------------------------
+
+#### Price Predictors
+
+After using the lasso regression, the number of predictors was reduced to 33. When all of these predictors were used in a linear regression model, many of them ended up being statistically insignificant so another 21 variables were eliminated through a backward elimination process. We can see the final regression coefficients below.
+
+
+
+We can see from the VIP plot that num_bath is more than 5 times more important than the next largest factor (neighborhood_Cole). Number of bathrooms is a good proxy for the size of the property, and it makes sense that larger properties could command higher prices.
+
+
+The metric comparison table shows that, both before and after performing backward elimination with the insignificant predictors, the lasso regression has a lower r-square (.406 then .405) than the original linear regression model (.448).  The lasso regressions do have slightly lower mean absolute errors than does the base model.
+
+
+We can see from the graph comparing the predictions of the original regression model and the final lasso model that both models tend to overpredict at lower prices, with the lasso regression exhibiting that trend more strongly.
+
+
+
+Column {data-width=400, data-height=1170}
+-----------------------------------------------------------------------
+
+### Predicting Price
+
+Here is the lasso regression model which narrowed down the number of predictors used to predict price.
+ 
+
+
+```{r}
+#continuous variable splitting into training and testing datasets
+
+abb_reg_recipe <- recipe(price ~ ., data = abb_reg) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_normalize(all_predictors()) %>%
+  prep()
+abb_reg_norm <- bake(abb_reg_recipe, abb_reg)
+ 
+
+```
+```{r}
+set.seed(12934)
+abb_reg_split_norm <- initial_split(abb_reg_norm, prop = .7)
+abb_reg_train_norm <- rsample::training(abb_reg_split_norm)
+abb_reg_test_norm <- rsample::testing(abb_reg_split_norm)
+
+```
+```{r}
+my_reg_metrics = metric_set(yardstick::rmse, 
+                            yardstick::mae, 
+                            yardstick::rsq)
+
+#folds
+abb_reg_grid <- tibble(penalty=seq(.1, 50, len = 500))
+abb_reg_fold <- vfold_cv(abb_reg_train_norm, v=5)
+
+```
+```{r}
+#Define Lasso Model Specifications
+abb_reg_lassotune_spec <- linear_reg(penalty = tune(),
+                          mixture = 1) %>% 
+                        set_engine("glmnet") %>% 
+                        set_mode("regression")
+
+#Create the workflow, add the recipe and tune on penalty
+abb_reg_lassotune_wf <- workflow() %>%
+                        add_model(abb_reg_lassotune_spec) %>% 
+                        add_formula(price ~ .)
+abb_reg_lassotune_rs <- abb_reg_lassotune_wf %>%
+                          tune_grid(resamples = abb_reg_fold, 
+                                    grid =abb_reg_grid,
+                                    metrics = my_reg_metrics)
+lowest_rmse_lasso <- abb_reg_lassotune_rs %>%
+                       select_best("rmse", penalty)
+
+abb_reg_final_lasso <- abb_reg_lassotune_wf %>% 
+                  finalize_workflow(lowest_rmse_lasso)
+abb_reg_final_lasso_fit <- abb_reg_final_lasso %>% 
+                       fit(abb_reg_train_norm)
+
+pred_abb_reg_final_lasso_fit <- abb_reg_final_lasso_fit %>% 
+                           augment(abb_reg_train_norm)
+
+```
+```{r} 
+#abb_reg_final_lasso_fit %>%
+#  extract_fit_parsnip() %>%
+#  tidy() %>%
+#  filter(estimate != 0) %>%
+#kable()
+```
+```{r}
+# updating normalized datasets with pared-down variables
+
+abb_reg_norm2 <- abb_reg_norm %>%
+  dplyr::select(price, host_response_rate, longitude, min_nights, max_nights, review_scores_rating, since_first_review, num_bath, host_in_denver_yes, neighborhood_Auraria, neighborhood_Belcaro, neighborhood_Berkeley, neighborhood_Capitol.Hill, neighborhood_CBD, neighborhood_Cheesman.Park, neighborhood_City.Park.West, neighborhood_Civic.Center, neighborhood_Cole, neighborhood_Gateway...Green.Valley.Ranch, neighborhood_Goldsmith, neighborhood_Highland, neighborhood_Indian.Creek, neighborhood_Lowry.Field, neighborhood_Mar.Lee, neighborhood_Overland, neighborhood_Stapleton, neighborhood_Union.Station,     neighborhood_Washington.Park.West, neighborhood_Washington.Virginia.Vale, neighborhood_West.Highland, neighborhood_Whittier, room_type_Hotel.room, room_type_Shared.room, bath_type_shared)
+``` 
+```{r}
+set.seed(12938)
+abb_reg_split_norm2 <- initial_split(abb_reg_norm2, prop = .7)
+abb_reg_train_norm2 <- rsample::training(abb_reg_split_norm2)
+abb_reg_test_norm2 <- rsample::testing(abb_reg_split_norm2)
+
+```
+```{r}
+
+# new folds for lasso dataset
+
+abb_reg_fold2 <- vfold_cv(abb_reg_train_norm2, v=5)
+```
+```{r}
+reg_spec <- linear_reg() %>%
+             set_engine('lm') %>%
+             set_mode('regression') 
+
+abb_reg_lasso_norm_fit <- reg_spec %>%
+                    fit(price ~ ., data = abb_reg_train_norm2)
+```
+
+
+
+-----------------------------------------------------------------------
+
+#### Results of linear regression with lasso-reduced predictors
+
+```{r, cache=TRUE}
+
+tidy(abb_reg_lasso_norm_fit$fit) %>%
+  kable(digits=3)
+
+```
+```{r}
+curr_reg_metrics <- pred_abb_reg_final_lasso_fit %>%
+  my_reg_metrics(truth=price, estimate = .pred)
+
+
+# adding results to comparison table
+results_abb_reg_new <-tibble(model = 'all_predictor_lasso',
+                         rmse = curr_reg_metrics[[1,3]],
+                         mae = curr_reg_metrics[[2,3]],
+                         rsq = curr_reg_metrics[[3,3]])
+results_abb_reg <- bind_rows(results_abb_reg, results_abb_reg_new)
+```
+
+
+Column {data-width=400, data-height=170}
+-----------------------------------------------------------------------
+
+#### Metrics for Model Including All Lasso Predictors
+
+```{r, cache=TRUE}
+
+results_abb_reg %>%
+  kable(digits=3)
+```
+```{r}
+#backwards elimination of insignificant predictors
+
+#eliminate neighborhood_Indian.Creek and neighborhood_Whittier
+
+#abb_reg_lasso_noicwh_fit <- reg_spec %>%
+#                    fit(price ~ host_response_rate + longitude + min_nights + max_nights + review_scores_rating + since_first_review + num_bath + host_in_denver_yes + neighborhood_Auraria + neighborhood_Belcaro + neighborhood_Berkeley + neighborhood_Capitol.Hill + neighborhood_CBD + neighborhood_Cheesman.Park + neighborhood_City.Park.West + neighborhood_Civic.Center + neighborhood_Cole + neighborhood_Gateway...Green.Valley.Ranch + neighborhood_Goldsmith + neighborhood_Highland + neighborhood_Lowry.Field + neighborhood_Mar.Lee + neighborhood_Overland + neighborhood_Stapleton + neighborhood_Union.Station +     neighborhood_Washington.Park.West + neighborhood_Washington.Virginia.Vale + neighborhood_West.Highland + room_type_Hotel.room + room_type_Shared.room + bath_type_shared, data = abb_reg_train_norm2)
+
+#tidy(abb_reg_lasso_noicwh_fit$fit) %>%
+#  kable(digits=3)
+```
+```{r}
+#eliminate host_response_rate
+
+#abb_reg_lasso_host_fit <- reg_spec %>%
+#                    fit(price ~ longitude + min_nights + max_nights + review_scores_rating + since_first_review + num_bath + host_in_denver_yes + neighborhood_Auraria + neighborhood_Belcaro + neighborhood_Berkeley + neighborhood_Capitol.Hill + neighborhood_CBD + neighborhood_Cheesman.Park + neighborhood_City.Park.West + neighborhood_Civic.Center + neighborhood_Cole + neighborhood_Gateway...Green.Valley.Ranch + neighborhood_Goldsmith + neighborhood_Highland + neighborhood_Lowry.Field + neighborhood_Mar.Lee + neighborhood_Overland + neighborhood_Stapleton + neighborhood_Union.Station +     neighborhood_Washington.Park.West + neighborhood_Washington.Virginia.Vale + neighborhood_West.Highland + room_type_Hotel.room + room_type_Shared.room + bath_type_shared, data = abb_reg_train_norm2)
+
+#tidy(abb_reg_lasso_host_fit$fit) %>%
+#  kable(digits=3)
+```
+```{r}
+#eliminate room_type_Hotel.room
+
+#abb_reg_lasso_nohotel_fit <- reg_spec %>%
+#                    fit(price ~ longitude + min_nights + max_nights + review_scores_rating + since_first_review + num_bath + host_in_denver_yes + neighborhood_Auraria + neighborhood_Belcaro + neighborhood_Berkeley + neighborhood_Capitol.Hill + neighborhood_CBD + neighborhood_Cheesman.Park + neighborhood_City.Park.West + neighborhood_Civic.Center + neighborhood_Cole + neighborhood_Gateway...Green.Valley.Ranch + neighborhood_Goldsmith + neighborhood_Highland + neighborhood_Lowry.Field + neighborhood_Mar.Lee + neighborhood_Overland + neighborhood_Stapleton + neighborhood_Union.Station +     neighborhood_Washington.Park.West + neighborhood_Washington.Virginia.Vale + neighborhood_West.Highland +  room_type_Shared.room + bath_type_shared, data = abb_reg_train_norm2)
+
+#tidy(abb_reg_lasso_nohotel_fit$fit) %>%
+#  kable(digits=3)
+```
+```{r}
+#eliminate room_type_Shared.room
+
+#abb_reg_lasso_noshared_fit <- reg_spec %>%
+#                    fit(price ~ longitude + min_nights + max_nights + review_scores_rating + since_first_review + num_bath + host_in_denver_yes + neighborhood_Auraria + neighborhood_Belcaro + neighborhood_Berkeley + neighborhood_Capitol.Hill + neighborhood_CBD + neighborhood_Cheesman.Park + neighborhood_City.Park.West + neighborhood_Civic.Center + neighborhood_Cole + neighborhood_Gateway...Green.Valley.Ranch + neighborhood_Goldsmith + neighborhood_Highland + neighborhood_Lowry.Field + neighborhood_Mar.Lee + neighborhood_Overland + neighborhood_Stapleton + neighborhood_Union.Station +     neighborhood_Washington.Park.West + neighborhood_Washington.Virginia.Vale + neighborhood_West.Highland +   bath_type_shared, data = abb_reg_train_norm2)
+
+#tidy(abb_reg_lasso_noshared_fit$fit) %>%
+#  kable(digits=3)
+```
+```{r}
+#eliminate neighborhood_Cheesman.Park
+
+#abb_reg_lasso_nochees_fit <- reg_spec %>%
+#                    fit(price ~ longitude + min_nights + max_nights + review_scores_rating + since_first_review + num_bath + host_in_denver_yes + neighborhood_Auraria + neighborhood_Belcaro + neighborhood_Berkeley + neighborhood_Capitol.Hill + neighborhood_CBD + neighborhood_City.Park.West + neighborhood_Civic.Center + neighborhood_Cole + neighborhood_Gateway...Green.Valley.Ranch + neighborhood_Goldsmith + neighborhood_Highland + neighborhood_Lowry.Field + neighborhood_Mar.Lee + neighborhood_Overland + neighborhood_Stapleton + neighborhood_Union.Station +     neighborhood_Washington.Park.West + neighborhood_Washington.Virginia.Vale + neighborhood_West.Highland +   bath_type_shared, data = abb_reg_train_norm2)
+
+#tidy(abb_reg_lasso_nochees_fit$fit) %>%
+#  kable(digits=3)
+```
+```{r}
+#eliminate neighborhood_Belcaro
+
+#abb_reg_lasso_nobelcaro_fit <- reg_spec %>%
+#                    fit(price ~ longitude + min_nights + max_nights + review_scores_rating + since_first_review + num_bath + host_in_denver_yes + neighborhood_Auraria + neighborhood_Berkeley + neighborhood_Capitol.Hill + neighborhood_CBD + neighborhood_City.Park.West + neighborhood_Civic.Center + neighborhood_Cole + neighborhood_Gateway...Green.Valley.Ranch + neighborhood_Goldsmith + neighborhood_Highland + neighborhood_Lowry.Field + neighborhood_Mar.Lee + neighborhood_Overland + neighborhood_Stapleton + neighborhood_Union.Station +     neighborhood_Washington.Park.West + neighborhood_Washington.Virginia.Vale + neighborhood_West.Highland +   bath_type_shared, data = abb_reg_train_norm2)
+
+#tidy(abb_reg_lasso_nobelcaro_fit$fit) %>%
+#  kable(digits=3)
+```
+```{r}
+#eliminate neighborhood_Auraria
+
+#abb_reg_lasso_noaur_fit <- reg_spec %>%
+#                    fit(price ~ longitude + min_nights + max_nights + review_scores_rating + since_first_review + num_bath + host_in_denver_yes + neighborhood_Berkeley + neighborhood_Capitol.Hill + neighborhood_CBD + neighborhood_City.Park.West + neighborhood_Civic.Center + neighborhood_Cole + neighborhood_Gateway...Green.Valley.Ranch + neighborhood_Goldsmith + neighborhood_Highland + neighborhood_Lowry.Field + neighborhood_Mar.Lee + neighborhood_Overland + neighborhood_Stapleton + neighborhood_Union.Station +     neighborhood_Washington.Park.West + neighborhood_Washington.Virginia.Vale + neighborhood_West.Highland +   bath_type_shared, data = abb_reg_train_norm2)
+
+#tidy(abb_reg_lasso_noaur_fit$fit) %>%
+#  kable(digits=3)
+```
+```{r}
+#eliminate longitude
+
+#abb_reg_lasso_nolong_fit <- reg_spec %>%
+#                    fit(price ~ min_nights + max_nights + review_scores_rating + since_first_review + num_bath + host_in_denver_yes + neighborhood_Berkeley + neighborhood_Capitol.Hill + neighborhood_CBD + neighborhood_City.Park.West + neighborhood_Civic.Center + neighborhood_Cole + neighborhood_Gateway...Green.Valley.Ranch + neighborhood_Goldsmith + neighborhood_Highland + neighborhood_Lowry.Field + neighborhood_Mar.Lee + neighborhood_Overland + neighborhood_Stapleton + neighborhood_Union.Station +     neighborhood_Washington.Park.West + neighborhood_Washington.Virginia.Vale + neighborhood_West.Highland +   bath_type_shared, data = abb_reg_train_norm2)
+
+#tidy(abb_reg_lasso_nolong_fit$fit) %>%
+#  kable(digits=3)
+```
+```{r}
+#eliminate neighborhood_Goldsmith
+
+#abb_reg_lasso_nogold_fit <- reg_spec %>%
+#                    fit(price ~ min_nights + max_nights + review_scores_rating + since_first_review + num_bath + host_in_denver_yes + neighborhood_Berkeley + neighborhood_Capitol.Hill + neighborhood_CBD + neighborhood_City.Park.West + neighborhood_Civic.Center + neighborhood_Cole + neighborhood_Gateway...Green.Valley.Ranch +  neighborhood_Highland + neighborhood_Lowry.Field + neighborhood_Mar.Lee + neighborhood_Overland + neighborhood_Stapleton + neighborhood_Union.Station +     neighborhood_Washington.Park.West + neighborhood_Washington.Virginia.Vale + neighborhood_West.Highland +   bath_type_shared, data = abb_reg_train_norm2)
+
+#tidy(abb_reg_lasso_nogold_fit$fit) %>%
+#  kable(digits=3)
+```
+```{r}
+#eliminate neighborhood_Washington.Park.West
+
+#abb_reg_lasso_nowashw_fit <- reg_spec %>%
+#                    fit(price ~ min_nights + max_nights + review_scores_rating + since_first_review + num_bath + host_in_denver_yes + neighborhood_Berkeley + neighborhood_Capitol.Hill + neighborhood_CBD + neighborhood_City.Park.West + neighborhood_Civic.Center + neighborhood_Cole + neighborhood_Gateway...Green.Valley.Ranch +  neighborhood_Highland + neighborhood_Lowry.Field + neighborhood_Mar.Lee + neighborhood_Overland + neighborhood_Stapleton + neighborhood_Union.Station  + neighborhood_Washington.Virginia.Vale + neighborhood_West.Highland +   bath_type_shared, data = abb_reg_train_norm2)
+
+#tidy(abb_reg_lasso_nowashw_fit$fit) %>%
+#  kable(digits=3)
+```
+```{r}
+#eliminate neighborhood_Berkeley
+
+#abb_reg_lasso_noberk_fit <- reg_spec %>%
+#                    fit(price ~ min_nights + max_nights + review_scores_rating + since_first_review + num_bath + host_in_denver_yes + neighborhood_Capitol.Hill + neighborhood_CBD + neighborhood_City.Park.West + neighborhood_Civic.Center + neighborhood_Cole + neighborhood_Gateway...Green.Valley.Ranch +  neighborhood_Highland + neighborhood_Lowry.Field + neighborhood_Mar.Lee + neighborhood_Overland + neighborhood_Stapleton + neighborhood_Union.Station  + neighborhood_Washington.Virginia.Vale + neighborhood_West.Highland +   bath_type_shared, data = abb_reg_train_norm2)
+
+#tidy(abb_reg_lasso_noberk_fit$fit) %>%
+#  kable(digits=3)
+```
+```{r}
+#eliminate neighborhood_Overland
+
+#abb_reg_lasso_noover_fit <- reg_spec %>%
+#                    fit(price ~ min_nights + max_nights + review_scores_rating + since_first_review + num_bath + host_in_denver_yes + neighborhood_Capitol.Hill + neighborhood_CBD + neighborhood_City.Park.West + neighborhood_Civic.Center + neighborhood_Cole + neighborhood_Gateway...Green.Valley.Ranch +  neighborhood_Highland + neighborhood_Lowry.Field + neighborhood_Mar.Lee + neighborhood_Stapleton + neighborhood_Union.Station  + neighborhood_Washington.Virginia.Vale + neighborhood_West.Highland +   bath_type_shared, data = abb_reg_train_norm2)
+
+#tidy(abb_reg_lasso_noover_fit$fit) %>%
+#  kable(digits=3)
+```
+```{r}
+#eliminate neighborhood_Lowry.Field
+
+#abb_reg_lasso_nolow_fit <- reg_spec %>%
+#                    fit(price ~ min_nights + max_nights + review_scores_rating + since_first_review + num_bath + host_in_denver_yes + neighborhood_Capitol.Hill + neighborhood_CBD + neighborhood_City.Park.West + neighborhood_Civic.Center + neighborhood_Cole + neighborhood_Gateway...Green.Valley.Ranch +  neighborhood_Highland + neighborhood_Mar.Lee + neighborhood_Stapleton + neighborhood_Union.Station  + neighborhood_Washington.Virginia.Vale + neighborhood_West.Highland +   bath_type_shared, data = abb_reg_train_norm2)
+
+#tidy(abb_reg_lasso_nolow_fit$fit) %>%
+#  kable(digits=3)
+```
+```{r}
+#eliminate neighborhood_Mar.Lee
+
+#abb_reg_lasso_nomar_fit <- reg_spec %>%
+#                    fit(price ~ min_nights + max_nights + review_scores_rating + since_first_review + num_bath + host_in_denver_yes + neighborhood_Capitol.Hill + neighborhood_CBD + neighborhood_City.Park.West + neighborhood_Civic.Center + neighborhood_Cole + neighborhood_Gateway...Green.Valley.Ranch +  neighborhood_Highland + neighborhood_Stapleton + neighborhood_Union.Station  + neighborhood_Washington.Virginia.Vale + neighborhood_West.Highland +   bath_type_shared, data = abb_reg_train_norm2)
+
+#tidy(abb_reg_lasso_nomar_fit$fit) %>%
+#  kable(digits=3)
+```
+```{r}
+#eliminate neighborhood_Washington.Virginia.Vale
+
+#abb_reg_lasso_nowav_fit <- reg_spec %>%
+#                    fit(price ~ min_nights + max_nights + review_scores_rating + since_first_review + num_bath + host_in_denver_yes + neighborhood_Capitol.Hill + neighborhood_CBD + neighborhood_City.Park.West + neighborhood_Civic.Center + neighborhood_Cole + neighborhood_Gateway...Green.Valley.Ranch +  neighborhood_Highland + neighborhood_Stapleton + neighborhood_Union.Station  + neighborhood_West.Highland + bath_type_shared, data = abb_reg_train_norm2)
+
+#tidy(abb_reg_lasso_nowav_fit$fit) %>%
+#  kable(digits=3)
+```
+```{r}
+#eliminate neighborhood_Capitol.Hill
+
+#abb_reg_lasso_nocap_fit <- reg_spec %>%
+#                    fit(price ~ min_nights + max_nights + review_scores_rating + since_first_review + num_bath + host_in_denver_yes + neighborhood_CBD + neighborhood_City.Park.West + neighborhood_Civic.Center + neighborhood_Cole + neighborhood_Gateway...Green.Valley.Ranch +  neighborhood_Highland + neighborhood_Stapleton + neighborhood_Union.Station  + neighborhood_West.Highland + bath_type_shared, data = abb_reg_train_norm2)
+
+#tidy(abb_reg_lasso_nocap_fit$fit) %>%
+#  kable(digits=3)
+```
+```{r}
+#eliminate neighborhood_West.Highland
+
+#abb_reg_lasso_nowhi_fit <- reg_spec %>%
+#                    fit(price ~ min_nights + max_nights + review_scores_rating + since_first_review + num_bath + host_in_denver_yes + neighborhood_CBD + neighborhood_City.Park.West + neighborhood_Civic.Center + neighborhood_Cole + neighborhood_Gateway...Green.Valley.Ranch +  neighborhood_Highland + neighborhood_Stapleton + neighborhood_Union.Station  + bath_type_shared, data = abb_reg_train_norm2)
+
+#tidy(abb_reg_lasso_nowhi_fit$fit) %>%
+#  kable(digits=3)
+```
+```{r}
+#eliminate host_in_denver_yes
+
+#abb_reg_lasso_noden_fit <- reg_spec %>%
+#                    fit(price ~ min_nights + max_nights + review_scores_rating + since_first_review + num_bath + neighborhood_CBD + neighborhood_City.Park.West + neighborhood_Civic.Center + neighborhood_Cole + neighborhood_Gateway...Green.Valley.Ranch +  neighborhood_Highland + neighborhood_Stapleton + neighborhood_Union.Station  + bath_type_shared, data = abb_reg_train_norm2)
+
+#tidy(abb_reg_lasso_noden_fit$fit) %>%
+#  kable(digits=3)
+```
+```{r}
+#eliminate since_first_review
+
+#abb_reg_lasso_nofirrev_fit <- reg_spec %>%
+#                    fit(price ~ min_nights + max_nights + review_scores_rating + num_bath + neighborhood_CBD + neighborhood_City.Park.West + neighborhood_Civic.Center + neighborhood_Cole + neighborhood_Gateway...Green.Valley.Ranch +  neighborhood_Highland + neighborhood_Stapleton + neighborhood_Union.Station + bath_type_shared, data = abb_reg_train_norm2)
+
+#tidy(abb_reg_lasso_nofirrev_fit$fit) %>%
+#  kable(digits=3)
+```
+```{r}
+#eliminate neighborhood_City.Park.West
+
+
+abb_reg_lasso_nocityw_fit <- reg_spec %>%
+                    fit(price ~ min_nights + max_nights + review_scores_rating + num_bath + neighborhood_CBD +  neighborhood_Civic.Center + neighborhood_Cole + neighborhood_Gateway...Green.Valley.Ranch +  neighborhood_Highland + neighborhood_Stapleton + neighborhood_Union.Station + bath_type_shared, data = abb_reg_train_norm2)
+```
+
+
+
+Column {data-width=400, data-height=550}
+-----------------------------------------------------------------------
+#### Results of linear regression after backward elimination of insignificant predictors
+
+The final equation for the lasso regression is:  price ~ min_nights + max_nights + review_scores_rating + num_bath + neighborhood_CBD +  neighborhood_Civic.Center + neighborhood_Cole + neighborhood_Gateway...Green.Valley.Ranch +  neighborhood_Highland + neighborhood_Stapleton + neighborhood_Union.Station + bath_type_shared
+
+
+```{r, cache=TRUE}
+tidy(abb_reg_lasso_nocityw_fit$fit) %>%
+  kable(digits=3)
+```
+```{r}
+abb_reg_lasso_final_fit <-abb_reg_lasso_nocityw_fit
+
+pred_abb_reg_lasso_final_fit <- abb_reg_lasso_final_fit %>% 
+                           augment(abb_reg_train_norm2)
+curr_reg_metrics <- pred_abb_reg_lasso_final_fit %>%
+  my_reg_metrics(truth=price, estimate = .pred)
+
+
+# adding results to comparison table
+results_abb_reg_new <-tibble(model = 'reg_lasso',
+                         rmse = curr_reg_metrics[[1,3]],
+                         mae = curr_reg_metrics[[2,3]],
+                         rsq = curr_reg_metrics[[3,3]])
+results_abb_reg <- bind_rows(results_abb_reg, results_abb_reg_new)
+```
+
+
+
+Column {data-width=400, data-height=550}
+-----------------------------------------------------------------------
+
+#### VIP Plot
+
+```{r, cache=TRUE}
+vip(abb_reg_lasso_final_fit)
+```
+
+
+Column {data-width=400, data-height=200}
+-----------------------------------------------------------------------
+
+#### Model Metrics Comparison
+
+```{r}
+results_abb_reg %>%
+  kable(digits=3)
+```
+
+
+Column {data-width=400, data-height=650}
+--------------------------------------------------------------------------
+
+#### Actual vs. Predicted model comparisons
+
+```{r, cache=TRUE}
+
+reg_pred <- bind_rows(pred_reg_all_pred_fit %>%
+  mutate(model = "Simple Regression"),
+  pred_abb_reg_lasso_final_fit %>%
+  mutate(model = "Lasso Regression"))
+reg_pred %>%
+  ggplot(aes(x=price, y=.pred, col=model)) +
+  geom_point(alpha=.40) +
+  xlab("Actual Price") +
+  ylab("Predicted Price") +
+  xlim(c(0,2625)) +
+  geom_abline(col="gold") + 
+  ggtitle("Comparing Simple Regression and Lasso Regression Models")
+```
+
+Lasso-VS {data-orientation=rows}
+=======================================================================
+Column {.sidebar data-width=520}
+-----------------------------------------------------------------------
+
+### Lasso Model for Categorical Value Score Variable
+
+Because of the large number of predictors in the dataset, lasso regression was used for narrowing down the number of predictors for the categorical variable (value_score_cat). The two categories are Excellent (a perfect score) and Other.
+
+We can see that the lasso regression narrowed the number of predictors down to three, and all three relate to customer reviews. Value score is a rating that indicates the extent to which the customer believes that the price they paid was worth the experience they had.
+
+The most significant predictor was the number of reviews in the last 12 months. Its positive value indicates that a larger number of reviews made an Excellent score more likely. The second most significant predictor was the review scores rating. This is the overall rating that customers give. Interestingly, it is a negative number, meaning that higher overall ratings make an Excellent value score less likely. The third predictor is the number of months since the property's first review. This positive value shows that the longer a property has been an airbnb, the more likely it is to receive an Excellent value score.
+
+Because the calculated R-square value is .464, we can see that these three predictors account for not-quite-half of the variability in the data. As the other predictors were eliminated in the lasso regression, we can infer that there important factors which are not captured in the data that is being measured. The metrics comparison shows that the regular logistic regression model with all of the predictors included is more accurate overall and has higher sensitivity, specificity, and auc. Finally, we can see clearly see the difference in the models' auc values on the ROC curve.
+
+
+
+
+Column {data-width=400, data-height=110}
+-----------------------------------------------------------------------
+
+### Predicting Value Score
+
+The lasso model yielded all significant predictors so no backward elimination process was needed. 
+ 
+-----------------------------------------------------------------------
+
+```{r} 
+#categorical variable splitting into training and testing datasets
+
+abb_cat_recipe <- recipe(value_score_cat ~ ., data = abb_cat) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_normalize(all_predictors()) %>%
+  prep()
+abb_cat_norm <- bake(abb_cat_recipe, abb_cat)
+ #names(abb_cat_norm)
+
+set.seed(12934)
+abb_cat_split_norm <- initial_split(abb_cat_norm, prop = .7, strata=value_score_cat)
+abb_cat_train_norm <- rsample::training(abb_cat_split_norm)
+abb_cat_test_norm <- rsample::testing(abb_cat_split_norm)
+
+```
+```{r}
+#metrics
+my_abb_cat_metrics <- metric_set(yardstick::accuracy,
+                               yardstick::sensitivity,
+                               yardstick::specificity)
+
+```
+```{r}
+
+#folds
+abb_cat_grid <- tibble(penalty=seq(.1, 50, len = 500))
+abb_cat_fold <- vfold_cv(abb_cat_train_norm, v=5, strata=value_score_cat)
+
+```
+```{r}
+#Define Model Specifications
+abb_cat_lassotune_spec <- logistic_reg(penalty = tune(),
+                          mixture = 1) %>% 
+                        set_engine("glmnet") %>% 
+                        set_mode("classification")
+
+#Create the workflow, add the recipe and tune on penalty
+abb_cat_lassotune_wf <- workflow() %>%
+                        add_model(abb_cat_lassotune_spec) %>% 
+                        add_formula(value_score_cat ~ .)
+abb_cat_lassotune_rs <- abb_cat_lassotune_wf %>%
+                          tune_grid(resamples = abb_cat_fold, 
+                                    grid =abb_cat_grid) #,
+                                    #metrics = my_abb_cat_metrics)
+lowest_roc_auc_lasso <- abb_cat_lassotune_rs %>%
+                       select_best("roc_auc", penalty)
+
+abb_cat_final_lasso <- abb_cat_lassotune_wf %>% 
+                  finalize_workflow(lowest_roc_auc_lasso)
+abb_cat_final_lasso_fit <- abb_cat_final_lasso %>% 
+                       fit(abb_cat_train_norm)
+
+pred_abb_cat_final_lasso_fit <- abb_cat_final_lasso_fit %>% 
+                           augment(abb_cat_train_norm)
+```
+```{r}
+#print(paste('The lowest ROC_AUC Lasso penalty is',lowest_roc_auc_lasso$penalty))
+```
+```{r}
+#abb_cat_final_lasso_fit %>%
+#  extract_fit_parsnip() %>%
+#  tidy() %>%
+#kable()
+```
+```{r}
+#abb_cat_final_lasso_fit %>%
+#  extract_fit_parsnip() %>%
+#  tidy() %>%
+#  filter(estimate != 0) %>%
+#kable()
+```
+```{r}
+
+#my_abb_cat_metrics <- metric_set(yardstick::accuracy,yardstick::sensitivity,
+#                               yardstick::specificity)
+#abb_cat_curr_metrics <- pred_abb_cat_final_lasso_fit %>% 
+#                    my_abb_cat_metrics(truth = value_score_cat, estimate = .pred_class)
+#curr_auc <- pred_abb_cat_final_lasso_fit %>%
+#                  roc_auc(truth = value_score_cat, estimate = .pred_excellent) %>%
+#                  pull(.estimate)
+
+#results_abb_cat_new <- tibble(model = 'first_lasso',
+#                  accuracy = abb_cat_curr_metrics[[1,3]], 
+#                  sensitivity = abb_cat_curr_metrics[[2,3]],
+#                  specificity = abb_cat_curr_metrics[[3,3]],
+#                  auc = round(curr_auc,2))
+#results_abb_cat <-bind_rows(results_abb_cat, results_abb_cat_new)
+```
+```{r}
+# create new normalized data and splits with smaller variable list
+abb_cat_norm2 <- abb_cat_norm %>%
+  dplyr::select(value_score_cat, number_of_reviews_ltm, review_scores_rating, since_first_review)
+
+set.seed(12938)
+abb_cat_split_norm2 <- initial_split(abb_cat_norm2, prop = .7, strata=value_score_cat)
+abb_cat_train_norm2 <- rsample::training(abb_cat_split_norm2)
+abb_cat_test_norm2 <- rsample::testing(abb_cat_split_norm2)
+
+```
+```{r}
+
+# new folds for lasso dataset
+abb_cat_fold2 <- vfold_cv(abb_cat_train_norm2, v=5, strata=value_score_cat)
+
+log_spec <- logistic_reg() %>%
+             set_engine('glm') %>%
+             set_mode('classification') 
+log_lasso_full_fit <- log_spec %>%
+                    fit(value_score_cat ~ ., data = abb_cat_train_norm2)
+#summary(log_lasso_full_fit$fit)
+```
+```{r}
+#Column {data-width=400, data-height=100}
+#-----------------------------------------------------------------------
+
+#### A Designation?
+
+#```{r, cache=TRUE}
+#glance(log_lasso_full_fit$fit) %>%
+#  kable(digits=3)
+```
+
+
+Column {data-width=400, data-height=300} 
+-----------------------------------------------------------------------
+
+#### Results of logistic regression using lasso predictors
+
+The final equation for the lasso regression is: value_score_cat ~ number_of_reviews_ltm + review_scores_rating + since_first_review
+
+```{r, cache=TRUE}
+tidy(log_lasso_full_fit$fit) %>%
+  kable(digits=3)
+```
+
+
+
+Column {data-width=400, data-height=150} 
+-----------------------------------------------------------------------
+
+#### Calculated R-square
+
+```{r, cache=TRUE}
+#find R^2
+dev <- glance(log_lasso_full_fit$fit) %>%
+          pull(deviance)
+null_dev <-glance(log_lasso_full_fit$fit) %>%
+          pull(null.deviance)
+lasso_rsq <- tibble(Measure="R-square",
+                    Value = 1 - (dev/null_dev))
+lasso_rsq %>%
+  kable(digits=3)
+```
+
+
+
+Column {data-width=400, data-height=170}  
+-----------------------------------------------------------------------
+
+#### Confusion Matrix
+
+```{r, cache=TRUE}
+#confusion matrix
+pred_log_lasso_full <- log_lasso_full_fit %>%
+                    augment(abb_cat_test_norm)
+
+pred_log_lasso_full %>%
+  conf_mat(truth = value_score_cat, estimate = .pred_class)
+
+```
+```{r}
+#metrics
+my_abb_cat_metrics <- metric_set(yardstick::accuracy,yardstick::sensitivity,
+                               yardstick::specificity)
+abb_cat_curr_metrics <- pred_log_lasso_full %>% 
+                    my_abb_cat_metrics(truth = value_score_cat, estimate = .pred_class)
+curr_auc <- pred_log_lasso_full %>%
+                  roc_auc(truth = value_score_cat, estimate = .pred_excellent) %>%
+                  pull(.estimate)
+
+results_abb_cat_new <- tibble(model = 'log_lasso_full',
+                  accuracy = abb_cat_curr_metrics[[1,3]], 
+                  sensitivity = abb_cat_curr_metrics[[2,3]],
+                  specificity = abb_cat_curr_metrics[[3,3]],
+                  auc = round(curr_auc,2))
+results_abb_cat <-bind_rows(results_abb_cat, results_abb_cat_new)
+```
+
+
+
+Column {data-width=400, data-height=220}  
+-----------------------------------------------------------------------
+
+#### Model Metrics Comparison
+
+```{r}
+results_abb_cat %>%
+  kable(digits = 3)
+```
+
+
+
+Column {data-width=400, data-height=520} 
+-----------------------------------------------------------------------
+
+#### VIP Plot
+
+```{r, cache=TRUE}
+vip(log_lasso_full_fit)
+```
+```{r}
+# ROC
+
+#Capture the thresholds and sens/spec
+abb_cat_roc <- bind_rows(abb_cat_roc, 
+                         pred_log_lasso_full %>% 
+  roc_curve(truth = value_score_cat, estimate=.pred_excellent) %>% 
+                mutate(model = paste('log_lasso_full',round(curr_auc,2))))
+```
+
+
+
+Column {data-width=400, data-height=590} 
+-----------------------------------------------------------------------
+
+#### ROC Curve
+
+```{r, cache=TRUE}
+
+#Plot the ROC Curve(s) 
+ggplot(abb_cat_roc, 
+        aes(x = 1 - specificity, y = sensitivity, 
+            group = model, col = model)) +
+        geom_path() +
+        geom_abline(lty = 3)  +
+        scale_color_brewer(palette = "Dark2") +
+        theme(legend.position = "top") 
+```
+
+
+Rand.For.-P {data-orientation=rows}
+=======================================================================
+Column {.sidebar data-width=520}
+----------------------------------------------------------------------
+
+### Random Forest Model for Price Variable
+
+Two random forest models were run: one with all of the available predictors and one using only the predictors resulting from the lasso regression. For both of the models I tried the following parameters:
+
+* **Number of variables to include (mtry)**: 2,3,4,5
+* **Number of trees (trees)**: 500, 1000
+* **Minimum number of records per leaf (min_n)**: 5, 10, 15, 20
+* **Maximum depth of tree (max.depth)**: 5, 6, 7, 8
+
+We can see that the best model for all predictors had these arguments:                    
+  mtry = 5
+  trees = 500
+  min_n = 20
+  max.depth = 8
+
+It did slightly better than the regular or lasso regressions in terms of R-square, but it had markedly higher error values. 
+
+The best model for the lasso predictor-only model had these arguments:
+  mtry = 5
+  trees = 1000
+  min_n = 10
+  max.depth = 8
+  
+It had the best R-square of all of the models at .484, and its rmse and mae values were much lower than those of the initial random forest model, though still higher than the two regression models.
+
+We see from the two graphs of actual and predicted values that the random forest models - particularly the lasso one - do better at predicting the lower price properties.
+
+The VIP plots also show the number of bathrooms as the most important predictor by far. This has - unsurprisingly - been the case for all of the models.
+
+
+Column {data-width=400, data-height=520}
+-----------------------------------------------------------------------
+
+### Part 1: Using all predictors
+
+
+```{r}
+#Random Forest for Predicting Price
+#Part 1: using all predictors
+
+#use original folds
+
+rf_grid <- expand_grid(mtry = 2:5,
+                       trees = c(500, 1000),
+                       min_n = c(5,10,15,20),
+                       max.depth = c(5,6,7,8))
+
+rf_reg_tune_spec <- rand_forest(mtry = tune(),
+                                trees = tune(),
+                                min_n = tune()) %>%
+                    set_engine("ranger",
+                               importance = "impurity",
+                               max.depth = tune()) %>%
+                    set_mode("regression")
+
+reg_tree_wf <- workflow() %>%
+                add_model(rf_reg_tune_spec) %>%
+                add_formula(price ~ .)
+
+reg_tree_full_rs <- reg_tree_wf %>%
+                tune_grid(resamples = abb_reg_fold,
+                          grid = rf_grid)
+
+#finalize workflow
+final_reg_tree_full_wf <- reg_tree_wf %>%
+  finalize_workflow(select_best(reg_tree_full_rs))
+final_reg_tree_full_wf
+
+```
+```{r}
+#fit the model
+set.seed(1996)
+final_reg_tree_full_fit<-final_reg_tree_full_wf %>%
+  fit(data=abb_reg_train_norm)
+
+#calculate metrics
+pred_final_reg_tree_full <- final_reg_tree_full_fit%>%
+  augment(abb_reg_test_norm)
+
+
+```
+```{r}
+# adding results to comparison table
+curr_reg_metrics <- pred_final_reg_tree_full%>%
+  my_reg_metrics(truth=price, estimate=.pred)
+
+results_abb_reg_new <-tibble(model = 'reg_full_rf',
+                         rmse = curr_reg_metrics[[1,3]],
+                         mae = curr_reg_metrics[[2,3]],
+                         rsq = curr_reg_metrics[[3,3]])
+results_abb_reg <- bind_rows(results_abb_reg, results_abb_reg_new)
+```
+
+
+
+Column {data-width=400, data-height=220} 
+-----------------------------------------------------------------------
+
+#### Model Metrics Comparison
+
+```{r, cache=TRUE}
+results_abb_reg %>%
+  kable(digits=3)
+```
+
+
+
+Column {data-width=400, data-height=520} 
+-----------------------------------------------------------------------
+
+#### VIP Plot
+
+```{r, cache=TRUE}
+#VIP plot
+final_reg_tree_full_fit %>%
+  extract_fit_parsnip() %>%
+  vip(aesthetics = list(fill = "#6e0000", col = "black"))
+
+```
+
+
+
+Column {data-width=400, data-height=520}
+-----------------------------------------------------------------------
+
+### Part 2: Using Lasso predictors only
+
+
+```{r}
+#Part 2: using lasso predictors only
+# re-use grid, model specification, workflow from Part 1
+
+reg_tree_lasso_rs <- reg_tree_wf%>%
+                    tune_grid(resamples = abb_reg_fold2,
+                              grid = rf_grid)
+
+#finalize workflow
+final_reg_tree_lasso_wf <- reg_tree_wf %>%
+  finalize_workflow(select_best(reg_tree_lasso_rs))
+final_reg_tree_lasso_wf
+
+```
+```{r}
+#fit the model
+set.seed(1998)
+final_reg_tree_lasso_fit<-final_reg_tree_lasso_wf %>%
+  fit(data=abb_reg_train_norm2)
+
+#calculate metrics
+pred_final_reg_tree_lasso <- final_reg_tree_lasso_fit%>%
+  augment(abb_reg_test_norm2)
+
+
+```
+```{r}
+
+# adding results to comparison table
+curr_reg_metrics <- pred_final_reg_tree_lasso%>%
+  my_reg_metrics(truth=price, estimate=.pred)
+
+results_abb_reg_new <-tibble(model = 'reg_lasso_rf',
+                         rmse = curr_reg_metrics[[1,3]],
+                         mae = curr_reg_metrics[[2,3]],
+                         rsq = curr_reg_metrics[[3,3]])
+results_abb_reg <- bind_rows(results_abb_reg, results_abb_reg_new)
+```
+
+
+
+Column {data-width=400, data-height=220} 
+-----------------------------------------------------------------------
+
+#### Model Metrics Comparison
+
+```{r, cache=TRUE}
+results_abb_reg %>%
+  kable(digits=3)
+```
+
+
+
+Column {data-width=400, data-height=520} 
+-----------------------------------------------------------------------
+
+#### VIP Plot
+
+```{r, cache=TRUE}
+#VIP plot
+final_reg_tree_lasso_fit %>%
+  extract_fit_parsnip() %>%
+  vip(aesthetics = list(fill = "#6e0000", col = "black"))
+
+```
+
+
+Column {data-width=400, data-height=1300}
+--------------------------------------------------------------------------
+
+#### Actual vs. Predicted model comparisons
+
+```{r, cache=TRUE}
+
+reg_pred <- bind_rows(pred_final_reg_tree_full %>%
+    mutate(model="Full Random Forest"),
+  pred_final_reg_tree_lasso %>%
+    mutate(model="Lasso Random Forest"))
+reg_pred %>%
+  ggplot(aes(x=price, y=.pred, col=model)) +
+  geom_point(alpha=.40) +
+  xlab("Actual Price") +
+  ylab("Predicted Price") +
+  xlim(c(0,2625)) +
+  geom_abline(col="gold") + 
+  ggtitle("Comparing Full and Lasso Random Forest Models")
+```
+
+
+```{r, cache=TRUE}
+reg_pred <- bind_rows(pred_reg_all_pred_fit %>%
+    mutate(model = "Simple Regression"),
+  pred_abb_reg_lasso_final_fit %>%
+    mutate(model = "Lasso Regression"),
+  pred_final_reg_tree_full %>%
+    mutate(model="Full Random Forest"),
+  pred_final_reg_tree_lasso %>%
+    mutate(model="Lasso Random Forest"))
+reg_pred %>%
+  ggplot(aes(x=price, y=.pred, col=model)) +
+  geom_point(alpha=.40) +
+  xlab("Actual Price") +
+  ylab("Predicted Price") +
+  xlim(c(0,2625)) +
+  geom_abline(col="gold") + 
+  ggtitle("Comparing Regression and Random Forest Models")
+```
+
+
+Rand.For.-VS {data-orientation=rows}
+=======================================================================
+Column {.sidebar data-width=520}
+-------------------------------------
+
+### Random Forest Model for Value Score Variable
+
+Two random forest models were run: one with all of the available predictors and one using only the predictors resulting from the lasso regression. For the model using all predictors I tried the following parameters:
+
+* **Number of variables to include (mtry)**: 2,3,4,5
+* **Number of trees (trees)**: 500, 1000
+* **Minimum number of records per leaf (min_n)**: 5, 10, 15, 20
+* **Maximum depth of tree (max.depth)**: 5, 6, 7, 8
+
+Because there were only three variables remaining after the lasso regression the second tree model had this change:
+
+* **Number of variables to include**: 2,3
+
+We can see that the best model for all predictors had these arguments:                    
+  mtry = 4
+  trees = 500
+  min_n = 10
+  max.depth = 8
+
+It did better than the regular or lasso logistic regressions in terms of specificity. It did better than the lasso regression for accuracy and auc, but it did the worst - by far - on sensitivity. 
+
+
+The best model for the lasso predictor-only model had these arguments:
+  mtry = 2
+  trees = 1000
+  min_n = 20
+  max.depth = 5
+
+With only 3 predictors, it is not surprising that the max depth is less and the min_n is more.
+  
+With an auc of .96, the random forest model with lasso predictors tied the auc of the full logistic regression model with all predictors. The lasso random forest did almost as well as the full logistic regression model.  The ROC curve shows these comparisons nicely.
+
+All the important predictors for both models are all related to review scores, and the most important predictor according to both models is review_scores_rating, which is the overall rating that a customer gives. For the model with all predictors, the number of reviews is a close second.
+
+ 
+
+
+
+Column {data-width=400, data-height=520}
+-----------------------------------------------------------------------
+
+### Part 1: Using all predictors
+
+
+```{r} 
+#Random Forest for Predicting Value Score Category
+#Part 1: using all predictors
+
+#use original folds and random forest grid previously defined
+
+rf_cat_tune_spec <- rand_forest(mtry = tune(),
+                                trees = tune(),
+                                min_n=tune()) %>%
+                    set_engine("ranger",
+                               importance = "impurity",
+                               max.depth = tune()) %>%
+                    set_mode("classification")
+
+cat_tree_wf <- workflow() %>%
+                add_model(rf_cat_tune_spec) %>%
+                add_formula(value_score_cat ~ .)
+
+cat_tree_full_rs <- cat_tree_wf %>%
+                tune_grid(resamples = abb_cat_fold,
+                          grid = rf_grid)
+#finalize workflow
+final_cat_tree_full_wf <- cat_tree_wf %>%
+  finalize_workflow(select_best(cat_tree_full_rs))
+final_cat_tree_full_wf
+```
+```{r}
+#fit the model
+set.seed(1996)
+final_cat_tree_full_fit<-final_cat_tree_full_wf %>%
+  fit(data=abb_cat_train_norm)
+
+#calculate metrics
+pred_final_cat_tree_full <- final_cat_tree_full_fit%>%
+  augment(abb_cat_test_norm)
+
+
+```
+
+
+
+Column {data-width=400, data-height=170}  
+-----------------------------------------------------------------------
+
+#### Confusion Matrix
+
+```{r, cache=TRUE}
+#confusion matrix
+
+pred_final_cat_tree_full %>%
+  conf_mat(truth = value_score_cat, estimate = .pred_class)
+
+```
+```{r}
+
+# adding results to comparison table
+abb_cat_curr_metrics <- pred_final_cat_tree_full%>%
+  my_abb_cat_metrics(truth=value_score_cat, estimate=.pred_class)
+
+curr_auc <- pred_final_cat_tree_full %>%
+                  roc_auc(truth = value_score_cat, estimate = .pred_excellent) %>%
+                  pull(.estimate)
+
+results_abb_cat_new <- tibble(model = 'cat_full_rf',
+                  accuracy = abb_cat_curr_metrics[[1,3]], 
+                  sensitivity = abb_cat_curr_metrics[[2,3]],
+                  specificity = abb_cat_curr_metrics[[3,3]],
+                  auc = round(curr_auc,2))
+results_abb_cat <-bind_rows(results_abb_cat, results_abb_cat_new)
+```
+
+
+
+Column {data-width=400, data-height=220} 
+-----------------------------------------------------------------------
+
+#### Model Metrics Comparison
+
+```{r, cache=TRUE}
+results_abb_cat %>%
+  kable(digits = 3)
+```
+
+
+
+Column {data-width=400, data-height=520} 
+-----------------------------------------------------------------------
+
+#### VIP Plot
+
+```{r, cache=TRUE}
+
+#VIP plot
+final_cat_tree_full_fit %>%
+  extract_fit_parsnip() %>%
+  vip(aesthetics = list(fill = "#6e0000", col = "black"))
+
+```
+```{r}
+# ROC
+
+#Capture the thresholds and sens/spec
+abb_cat_roc <- bind_rows(abb_cat_roc, 
+                         pred_final_cat_tree_full %>% 
+  roc_curve(truth = value_score_cat, estimate=.pred_excellent) %>% 
+                mutate(model = paste('rf_tree_full',round(curr_auc,2))))
+```
+
+
+
+Column {data-width=400, data-height=590} 
+-----------------------------------------------------------------------
+
+#### ROC Curve
+
+```{r, cache=TRUE}
+
+#Plot the ROC Curve(s) 
+ggplot(abb_cat_roc, 
+        aes(x = 1 - specificity, y = sensitivity, 
+            group = model, col = model)) +
+        geom_path() +
+        geom_abline(lty = 3)  +
+        scale_color_brewer(palette = "Dark2") +
+        theme(legend.position = "top") 
+
+```
+
+
+
+Column {data-width=400, data-height=520}
+-----------------------------------------------------------------------
+
+### Part 2: Using Lasso predictors only
+
+
+```{r}
+#Part 2: using lasso predictors only
+# re-use model specification, workflow from Part 1
+
+#specify new grid b/c only 3 predictors captured by lasso
+rf_grid <- expand_grid(mtry = c(2,3),
+                       trees = c(500, 1000),
+                       min_n = c(5,10,15,20),
+                       max.depth = c(5,6,7,8))
+
+
+cat_tree_lasso_rs <- cat_tree_wf%>%
+                    tune_grid(resamples = abb_cat_fold2,
+                              grid = rf_grid)
+#finalize workflow
+final_cat_tree_lasso_wf <- cat_tree_wf %>%
+  finalize_workflow(select_best(cat_tree_lasso_rs))
+final_cat_tree_lasso_wf
+
+```
+```{r}
+#fit the model
+set.seed(1998)
+final_cat_tree_lasso_fit<-final_cat_tree_lasso_wf %>%
+  fit(data=abb_cat_train_norm2)
+
+#calculate metrics
+pred_final_cat_tree_lasso <- final_cat_tree_lasso_fit%>%
+  augment(abb_cat_test_norm2)
+
+```
+
+
+
+Column {data-width=400, data-height=170}  
+-----------------------------------------------------------------------
+
+#### Confusion Matrix
+
+```{r, cache=TRUE}
+#confusion matrix
+
+pred_final_cat_tree_lasso %>%
+  conf_mat(truth = value_score_cat, estimate = .pred_class)
+
+```
+```{r}
+
+# adding results to comparison table
+abb_cat_curr_metrics <- pred_final_cat_tree_lasso%>%
+  my_abb_cat_metrics(truth=value_score_cat, estimate=.pred_class)
+
+curr_auc <- pred_final_cat_tree_lasso %>%
+                  roc_auc(truth = value_score_cat, estimate = .pred_excellent) %>%
+                  pull(.estimate)
+
+results_abb_cat_new <- tibble(model = 'cat_lasso_rf',
+                  accuracy = abb_cat_curr_metrics[[1,3]], 
+                  sensitivity = abb_cat_curr_metrics[[2,3]],
+                  specificity = abb_cat_curr_metrics[[3,3]],
+                  auc = round(curr_auc,2))
+results_abb_cat <-bind_rows(results_abb_cat, results_abb_cat_new)
+```
+
+
+
+Column {data-width=400, data-height=220} 
+-----------------------------------------------------------------------
+
+#### Model Metrics Comparison
+
+```{r, cache=TRUE}
+
+results_abb_cat %>%
+  kable(digits = 3)
+```
+
+
+
+Column {data-width=400, data-height=520} 
+-----------------------------------------------------------------------
+
+#### VIP Plot
+
+```{r, cache=TRUE}
+
+#VIP plot
+final_cat_tree_lasso_fit %>%
+  extract_fit_parsnip() %>%
+  vip(aesthetics = list(fill = "#6e0000", col = "black"))
+
+```
+```{r}
+# ROC
+
+#Capture the thresholds and sens/spec
+abb_cat_roc <- bind_rows(abb_cat_roc, 
+                         pred_final_cat_tree_lasso %>% 
+  roc_curve(truth = value_score_cat, estimate=.pred_excellent) %>% 
+                mutate(model = paste('rf_tree_lasso',round(curr_auc,2))))
+```
+
+
+
+Column {data-width=400, data-height=590} 
+-----------------------------------------------------------------------
+
+#### ROC Curve
+
+```{r, cache=TRUE}
+
+#Plot the ROC Curve(s) 
+ggplot(abb_cat_roc, 
+        aes(x = 1 - specificity, y = sensitivity, 
+            group = model, col = model)) +
+        geom_path() +
+        geom_abline(lty = 3)  +
+        scale_color_brewer(palette = "Dark2") +
+        theme(legend.position = "top") 
+```
+
+
+Conclusion {data-orientation=rows}
+=======================================================================
+Column {.sidebar data-width=520}
+-----------------------------------------------------------------------
+
+### Project Conclusion
+
+**Price**
+Number of baths is the most important predictor of price, by a huge margin. Number of baths is a good proxy for property size: more baths suggests larger property. Price being higher for a larger property makes sense. 
+
+If we want to find out what can be done to charge a higher price for a property, though, we need to look to the VIP plot (for relative importance) and the regression coefficients (to see if they are positive or negative, in this case). The chosen VIP plot is from the best-performing model overall; the coefficients are from the best regression model. Though the two models don't agree on the ranking, we can still gain insight.
+
+The three most important factors that a host could change are minimum nights, review scores rating, and maximum nights. We see from the regression coefficients that having a lower number of minimum nights, a higher number of maximum nights, and a higher review scores rating all increase price. The takeaway for a host is to be flexible (allow for both shorter and longer stays) and to work hard to please the customers. 
+
+Regarding the models themselves, we see from the metrics comparison and the actual vs predicted plot that the random forest model using the lasso predictors does the best at explaining the data, especially at the lower end of the price scale. The wide range of prices makes it difficult to predict the ones at the higher end of the scale. This is likely why none of the models were able to explain even half of the variation in the data (the highest R-square was .484).
+
+
+--------------------------------------------------------------------
+
+**Value Score**
+Review scores rating is the most important predictor of value score, by far, according to the random forest model that uses only lasso predictors. We can see that this model has the highest auc value and the second-best accuracy, sensitivity, and specificity values. I chose this model because it is simpler than the logistic regression model with all predictors (and because only 22 of the 105 normalized predictors from that model had p-values < .1). 
+
+The coefficients from the logistic regression with lasso predictors give us the additional information that review scores rating is **negatively** correlated with value score. This would mean that higher-rated properties overall are rated as having lower value for the price. The other two significant predictors from the lasso regression are the number of reviews in the last 12 months and the number of months since the first review of the property.  These are both positively correlated to value score, which means that properties that have been airbnbs longer and which have had more customers recently receive better ratings for value.
+
+The takeaway from the negative correlation between review scores rating and value score may be that, even though customers have a great overall experience at an airbnb, they may believe that it was overpriced. 
+
+More research should be done before offering airbnb hosts advice on this matter, however.
+
+
+
+Column {data-width=400, data-height=220} 
+-----------------------------------------------------------------------
+
+#### Price Model Metrics Comparison
+
+```{r, cache=TRUE}
+results_abb_reg %>%
+  kable(digits=3)
+```
+
+
+
+Column {data-width=400, data-height=520} 
+-----------------------------------------------------------------------
+
+#### VIP Plot for Random Forest Model with Lasso Predictors
+
+```{r, cache=TRUE}
+#VIP plot
+final_reg_tree_lasso_fit %>%
+  extract_fit_parsnip() %>%
+  vip(aesthetics = list(fill = "#6e0000", col = "black"))
+
+```
+
+
+Column {data-width=400, data-height=650}
+--------------------------------------------------------------------------
+
+#### Actual vs. Predicted Price model comparisons
+
+```{r, cache=TRUE}
+reg_pred <- bind_rows(pred_reg_all_pred_fit %>%
+    mutate(model = "Simple Regression"),
+  pred_abb_reg_lasso_final_fit %>%
+    mutate(model = "Lasso Regression"),
+  pred_final_reg_tree_full %>%
+    mutate(model="Full Random Forest"),
+  pred_final_reg_tree_lasso %>%
+    mutate(model="Lasso Random Forest"))
+reg_pred %>%
+  ggplot(aes(x=price, y=.pred, col=model)) +
+  geom_point(alpha=.40) +
+  xlab("Actual Price") +
+  ylab("Predicted Price") +
+  xlim(c(0,2625)) +
+  geom_abline(col="gold") + 
+  ggtitle("Comparing Regression and Random Forest Models")
+```
+
+
+
+Column {data-width=400, data-height=550}
+-----------------------------------------------------------------------
+#### Linear regression with lasso predictors
+
+
+```{r, cache=TRUE}
+tidy(abb_reg_lasso_nocityw_fit$fit) %>%
+  kable(digits=3)
+```
+
+
+
+
+Column {data-width=400, data-height=220} 
+-----------------------------------------------------------------------
+
+#### Value Score Model Metrics Comparison
+
+```{r, cache=TRUE}
+
+results_abb_cat %>%
+  kable(digits = 3)
+```
+
+
+
+Column {data-width=400, data-height=520} 
+-----------------------------------------------------------------------
+
+#### VIP Plot for Random Forest Model with Lasso Predictors
+
+```{r, cache=TRUE}
+
+#VIP plot
+final_cat_tree_lasso_fit %>%
+  extract_fit_parsnip() %>%
+  vip(aesthetics = list(fill = "#6e0000", col = "black"))
+
+```
+
+
+
+Column {data-width=400, data-height=590} 
+-----------------------------------------------------------------------
+
+#### Value Score ROC Curves
+
+```{r, cache=TRUE}
+
+#Plot the ROC Curve(s) 
+ggplot(abb_cat_roc, 
+        aes(x = 1 - specificity, y = sensitivity, 
+            group = model, col = model)) +
+        geom_path() +
+        geom_abline(lty = 3)  +
+        scale_color_brewer(palette = "Dark2") +
+        theme(legend.position = "top") 
+
+```
+
+
+Column {data-width=400, data-height=300} 
+-----------------------------------------------------------------------
+
+#### Logistic regression with lasso predictors
+
+```{r, cache=TRUE}
+tidy(log_lasso_full_fit$fit) %>%
+  kable(digits=3)
+```
+
+
+
+Reflection {data-orientation=rows}
+=======================================================================
+
+Row {data-height=1250}
+-----------------------------------------------------------------------
+### Reflection
+
+**Most Proud**
+
+I am most proud of my data cleaning and variable transformations. I worked hard to make sure that all of the necessary transformations were done in R so that I could import the data straight in from the InsideAirbnb.com website at any time. Some of the code is clunky (I used a massive case statement to recode the bathroom variable), but it works! 
+
+**If I Had More Time**
+
+If I had another week I would try a log transformation on the price variable.  It's just so skewed. I don't think it would change the fact that number of bathrooms (property size, really) is the dominant factor for price, but it might allow for more insight about what else matters.
+
+For the categorical variable, I would want to try some regular trees using all the predictors. It's interesting that the overall customer rating is negatively correlated with the value score rating. I'm curious if other score ratings would be positively or negatively correlated to it.
+
